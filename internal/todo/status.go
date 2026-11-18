@@ -1,57 +1,121 @@
 package todo
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 )
 
-func (h *handler) statusPage(w http.ResponseWriter, r *http.Request) {
-	dbErr := h.store.Ping(r.Context())
-	dbOK := dbErr == nil
-	overallOK := dbOK
+type StatusComponent struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
 
-	overallLabel := "All systems operational"
-	overallClass := "operational"
+type StatusReport struct {
+	Overall      string            `json:"overall"`
+	Message      string            `json:"message"`
+	CheckedAt    string            `json:"checked_at"`
+	Uptime       string            `json:"uptime"`
+	UptimeSecond int64             `json:"uptime_seconds"`
+	Components   []StatusComponent `json:"components"`
+}
+
+func (h *handler) collectStatus(ctx context.Context) StatusReport {
+	dbErr := h.store.Ping(ctx)
+	dbOK := dbErr == nil
+
+	message := "All systems operational"
+	overall := "operational"
 	if !dbOK {
-		overallLabel = "Service disruption"
-		overallClass = "outage"
+		message = "Service disruption — database unreachable"
+		overall = "outage"
 	}
 
 	uptime := time.Since(h.startedAt).Round(time.Second)
-	checked := time.Now().UTC().Format(time.RFC3339)
+
+	return StatusReport{
+		Overall:      overall,
+		Message:      message,
+		CheckedAt:    time.Now().UTC().Format(time.RFC3339),
+		Uptime:       formatDuration(uptime),
+		UptimeSecond: int64(uptime.Seconds()),
+		Components: []StatusComponent{
+			{Name: "API", Status: "up", Detail: "Serving HTTP requests"},
+			{Name: "PostgreSQL", Status: componentStatus(dbOK), Detail: dbDetail(dbOK, dbErr)},
+		},
+	}
+}
+
+func componentStatus(ok bool) string {
+	if ok {
+		return "up"
+	}
+	return "down"
+}
+
+func (h *handler) statusHealth(w http.ResponseWriter, r *http.Request) {
+	report := h.collectStatus(r.Context())
+	status := http.StatusOK
+	if report.Overall != "operational" {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, report)
+}
+
+func (h *handler) statusPage(w http.ResponseWriter, r *http.Request) {
+	report := h.collectStatus(r.Context())
+
+	bannerClass := report.Overall
+	overallLabel := "Operational"
+	overallIcon := "✓"
+	if report.Overall != "operational" {
+		overallLabel = "Outage"
+		overallIcon = "!"
+	}
+
+	rows := ""
+	for _, c := range report.Components {
+		rows += componentCard(c)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if !overallOK {
+	if report.Overall != "operational" {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 
 	fmt.Fprintf(w, statusHTML,
-		overallClass, overallLabel,
-		componentRow("API", true, "Serving requests"),
-		componentRow("PostgreSQL", dbOK, dbDetail(dbOK, dbErr)),
-		formatDuration(uptime),
-		checked,
+		bannerClass, overallLabel,
+		bannerClass, overallIcon, report.Message,
+		report.Uptime, report.CheckedAt,
+		rows,
 	)
 }
 
-func componentRow(name string, ok bool, detail string) string {
-	status := "Operational"
-	chipClass := "up"
-	if !ok {
-		status = "Down"
-		chipClass = "down"
+func componentCard(c StatusComponent) string {
+	up := c.Status == "up"
+	statusLabel := "Operational"
+	cardClass := "up"
+	dotClass := "dot-up"
+	if !up {
+		statusLabel = "Down"
+		cardClass = "down"
+		dotClass = "dot-down"
 	}
-	return fmt.Sprintf(`<tr>
-  <td class="component">%s</td>
-  <td><span class="chip %s">%s</span></td>
-  <td class="detail">%s</td>
-</tr>`, name, chipClass, status, detail)
+	return fmt.Sprintf(`<article class="service %s">
+  <div class="service-head">
+    <span class="dot %s" aria-hidden="true"></span>
+    <h3>%s</h3>
+    <span class="pill %s">%s</span>
+  </div>
+  <p class="service-detail">%s</p>
+</article>`, cardClass, dotClass, c.Name, cardClass, statusLabel, c.Detail)
 }
 
 func dbDetail(ok bool, err error) string {
 	if ok {
-		return "Connected"
+		return "Connected and responding to ping"
 	}
 	if err != nil {
 		return "Connection failed"
@@ -87,163 +151,282 @@ const statusHTML = `<!DOCTYPE html>
   <title>Todo API — Status</title>
   <style>
     :root {
-      color-scheme: light dark;
-      --bg: #0f1419;
-      --surface: #1a2332;
-      --border: #2d3a4d;
-      --text: #e7ecf3;
-      --muted: #8b9cb3;
-      --green: #3dd68c;
-      --green-dim: #1e3d32;
-      --red: #f87171;
-      --red-dim: #3d2222;
-      --amber: #fbbf24;
-      --amber-dim: #3d3422;
-    }
-    @media (prefers-color-scheme: light) {
-      :root {
-        --bg: #f4f6f9;
-        --surface: #ffffff;
-        --border: #e2e8f0;
-        --text: #1e293b;
-        --muted: #64748b;
-        --green-dim: #dcfce7;
-        --red-dim: #fee2e2;
-        --amber-dim: #fef3c7;
-      }
+      --violet: #8b5cf6;
+      --violet-soft: #a78bfa;
+      --cyan: #22d3ee;
+      --pink: #f472b6;
+      --emerald: #34d399;
+      --emerald-bg: rgba(52, 211, 153, 0.15);
+      --rose: #fb7185;
+      --rose-bg: rgba(251, 113, 133, 0.18);
+      --surface: rgba(255, 255, 255, 0.08);
+      --surface-strong: rgba(255, 255, 255, 0.12);
+      --border: rgba(255, 255, 255, 0.14);
+      --text: #f8fafc;
+      --muted: #94a3b8;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       color: var(--text);
-      line-height: 1.5;
+      background: #0c0a14;
+      background-image:
+        radial-gradient(ellipse 80%% 50%% at 20%% -10%%, rgba(139, 92, 246, 0.45), transparent),
+        radial-gradient(ellipse 60%% 40%% at 90%% 10%%, rgba(34, 211, 238, 0.25), transparent),
+        radial-gradient(ellipse 50%% 30%% at 50%% 100%%, rgba(244, 114, 182, 0.2), transparent);
+      line-height: 1.55;
     }
-    main {
-      max-width: 640px;
+    .wrap {
+      max-width: 720px;
       margin: 0 auto;
-      padding: 2.5rem 1.25rem 3rem;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--violet), var(--cyan));
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 1.1rem;
+      box-shadow: 0 8px 24px rgba(139, 92, 246, 0.35);
     }
     h1 {
-      font-size: 1.5rem;
-      font-weight: 600;
-      margin: 0 0 0.25rem;
-      letter-spacing: -0.02em;
+      margin: 0;
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      background: linear-gradient(90deg, #fff, var(--violet-soft));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
     .subtitle {
       color: var(--muted);
-      font-size: 0.9375rem;
-      margin-bottom: 2rem;
+      margin: 0.35rem 0 2rem;
+      font-size: 1rem;
     }
     .banner {
-      border-radius: 12px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 1.5rem;
-      font-weight: 600;
       display: flex;
-      align-items: center;
-      gap: 0.625rem;
-    }
-    .banner::before {
-      content: '';
-      width: 10px;
-      height: 10px;
-      border-radius: 50%%;
-      flex-shrink: 0;
+      align-items: flex-start;
+      gap: 1rem;
+      padding: 1.25rem 1.35rem;
+      border-radius: 16px;
+      margin-bottom: 1.75rem;
+      border: 1px solid var(--border);
+      backdrop-filter: blur(12px);
     }
     .banner.operational {
-      background: var(--green-dim);
-      color: var(--green);
+      background: linear-gradient(135deg, var(--emerald-bg), rgba(34, 211, 238, 0.08));
+      border-color: rgba(52, 211, 153, 0.35);
     }
-    .banner.operational::before { background: var(--green); }
     .banner.outage {
-      background: var(--red-dim);
-      color: var(--red);
+      background: linear-gradient(135deg, var(--rose-bg), rgba(139, 92, 246, 0.08));
+      border-color: rgba(251, 113, 133, 0.4);
     }
-    .banner.outage::before { background: var(--red); }
-    .card {
+    .banner-icon {
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 1.25rem;
+      flex-shrink: 0;
+    }
+    .banner.operational .banner-icon {
+      background: var(--emerald);
+      color: #042f1a;
+    }
+    .banner.outage .banner-icon {
+      background: var(--rose);
+      color: #450a0a;
+    }
+    .banner h2 {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 600;
+    }
+    .banner p {
+      margin: 0.25rem 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.85rem;
+      margin-bottom: 1.75rem;
+    }
+    .stat {
+      padding: 1rem 1.1rem;
+      border-radius: 14px;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
-      margin-bottom: 1.5rem;
+      backdrop-filter: blur(8px);
     }
-    table {
-      width: 100%%;
-      border-collapse: collapse;
-      font-size: 0.9375rem;
+    .stat-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--cyan);
+      font-weight: 600;
+      margin-bottom: 0.35rem;
     }
-    th, td {
-      padding: 0.875rem 1.25rem;
-      text-align: left;
-      border-bottom: 1px solid var(--border);
+    .stat-value {
+      font-size: 1.05rem;
+      font-weight: 600;
+      word-break: break-word;
     }
-    tr:last-child td { border-bottom: none; }
-    th {
+    .section-title {
       font-size: 0.75rem;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--muted);
+      letter-spacing: 0.1em;
+      color: var(--pink);
+      font-weight: 700;
+      margin: 0 0 0.75rem 0.15rem;
+    }
+    .services {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 1.75rem;
+    }
+    .service {
+      padding: 1.1rem 1.25rem;
+      border-radius: 14px;
+      background: var(--surface-strong);
+      border: 1px solid var(--border);
+      border-left-width: 4px;
+    }
+    .service.up { border-left-color: var(--emerald); }
+    .service.down { border-left-color: var(--rose); }
+    .service-head {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+    .service h3 {
+      margin: 0;
+      flex: 1;
+      font-size: 1rem;
       font-weight: 600;
     }
-    .component { font-weight: 500; }
-    .detail { color: var(--muted); font-size: 0.875rem; }
-    .chip {
-      display: inline-block;
-      font-size: 0.75rem;
-      font-weight: 600;
-      padding: 0.2rem 0.55rem;
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%%;
+    }
+    .dot-up { background: var(--emerald); box-shadow: 0 0 10px var(--emerald); }
+    .dot-down { background: var(--rose); box-shadow: 0 0 10px var(--rose); }
+    .pill {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.25rem 0.65rem;
       border-radius: 999px;
     }
-    .chip.up { background: var(--green-dim); color: var(--green); }
-    .chip.down { background: var(--red-dim); color: var(--red); }
-    .meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1.25rem;
+    .pill.up { background: var(--emerald-bg); color: var(--emerald); }
+    .pill.down { background: var(--rose-bg); color: var(--rose); }
+    .service-detail {
+      margin: 0.5rem 0 0 1.4rem;
+      color: var(--muted);
+      font-size: 0.875rem;
+    }
+    .api-card {
+      padding: 1.15rem 1.25rem;
+      border-radius: 14px;
+      background: linear-gradient(160deg, rgba(139, 92, 246, 0.2), rgba(12, 10, 20, 0.6));
+      border: 1px solid rgba(167, 139, 250, 0.35);
+      margin-bottom: 1.5rem;
+    }
+    .api-card h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.95rem;
+      color: var(--violet-soft);
+    }
+    .api-card p {
+      margin: 0 0 0.75rem;
       font-size: 0.875rem;
       color: var(--muted);
     }
-    .meta strong { color: var(--text); font-weight: 500; }
+    code.endpoint {
+      display: block;
+      padding: 0.65rem 0.85rem;
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.35);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 0.8rem;
+      color: var(--cyan);
+      word-break: break-all;
+    }
+    .api-card a {
+      color: var(--cyan);
+      font-weight: 500;
+    }
     footer {
-      margin-top: 2rem;
       font-size: 0.8125rem;
       color: var(--muted);
+      text-align: center;
     }
-    footer a { color: var(--muted); }
-    footer a:hover { color: var(--text); }
+    footer a { color: var(--violet-soft); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Todo API</h1>
-    <p class="subtitle">System status and component health</p>
-    <div class="banner %s">%s</div>
-    <div class="card">
-      <table>
-        <thead>
-          <tr>
-            <th>Component</th>
-            <th>Status</th>
-            <th>Detail</th>
-          </tr>
-        </thead>
-        <tbody>
-          %s
-          %s
-        </tbody>
-      </table>
+  <div class="wrap">
+    <header class="brand">
+      <div class="logo" aria-hidden="true">T</div>
+      <div>
+        <h1>Todo API</h1>
+        <p class="subtitle">Live service status · <span class="pill %s" style="display:inline-block;vertical-align:middle;">%s</span></p>
+      </div>
+    </header>
+
+    <div class="banner %s">
+      <div class="banner-icon">%s</div>
+      <div>
+        <h2>%s</h2>
+        <p>Components are monitored on each page load.</p>
+      </div>
     </div>
-    <div class="meta">
-      <span>Process uptime: <strong>%s</strong></span>
-      <span>Last checked: <strong>%s</strong></span>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Uptime</div>
+        <div class="stat-value">%s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Last check (UTC)</div>
+        <div class="stat-value">%s</div>
+      </div>
     </div>
+
+    <p class="section-title">Components</p>
+    <div class="services">%s</div>
+
+    <div class="api-card">
+      <h3>Status health API</h3>
+      <p>Machine-readable report for monitors and integrations (same data as this page).</p>
+      <code class="endpoint">GET /status/health</code>
+      <p style="margin-top:0.75rem;margin-bottom:0"><a href="/status/health">Open JSON response →</a></p>
+    </div>
+
     <footer>
-      Auto-refreshes every 60s · JSON health at <a href="/health">/health</a>
+      Refreshes every 60s · Liveness probe <a href="/health">/health</a>
     </footer>
-  </main>
+  </div>
 </body>
 </html>
 `

@@ -13,6 +13,7 @@ func NewHandler(store *Store, startedAt time.Time) http.Handler {
 	mux := http.NewServeMux()
 	h := &handler{store: store, startedAt: startedAt}
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("GET /status/health", h.statusHealth)
 	mux.HandleFunc("GET /status", h.statusPage)
 	mux.HandleFunc("GET /todos", h.list)
 	mux.HandleFunc("POST /todos", h.create)
