@@ -44,9 +44,10 @@ func main() {
 	}
 	log.Print("postgres connected and todos table ready")
 
+	startedAt := time.Now()
 	server := &http.Server{
 		Addr:              ":" + port,
-		Handler:           todo.NewHandler(store),
+		Handler:           todo.NewHandler(store, startedAt),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("listening on %s", server.Addr)

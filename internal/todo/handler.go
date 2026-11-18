@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
-func NewHandler(store *Store) http.Handler {
+func NewHandler(store *Store, startedAt time.Time) http.Handler {
 	mux := http.NewServeMux()
-	h := &handler{store: store}
+	h := &handler{store: store, startedAt: startedAt}
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("GET /status", h.statusPage)
 	mux.HandleFunc("GET /todos", h.list)
 	mux.HandleFunc("POST /todos", h.create)
 	mux.HandleFunc("GET /todos/{id}", h.get)
@@ -21,7 +23,8 @@ func NewHandler(store *Store) http.Handler {
 }
 
 type handler struct {
-	store *Store
+	store     *Store
+	startedAt time.Time
 }
 
 func (h *handler) health(w http.ResponseWriter, r *http.Request) {
